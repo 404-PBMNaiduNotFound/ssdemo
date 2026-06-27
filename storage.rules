@@ -1,0 +1,20 @@
+// storage.rules
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Organization profile images — public read, owner-only write
+    match /organizations/{orgId}/profile.jpg {
+      allow read:  if true;
+      allow write: if request.auth != null && request.auth.uid == orgId;
+    }
+
+    // Vendor verification documents — vendor can upload their own,
+    // any signed-in user can read (download URLs are token-gated anyway)
+    match /vendors/{vendorId}/documents/{fileName} {
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == vendorId;
+    }
+  }
+}
