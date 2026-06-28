@@ -2,6 +2,9 @@
 
 import { useState, useEffect } from "react"
 import { OrderDoc, markOrderReadyForPickup, markOrderPickedUp } from "@/lib/firestore"
+import { uploadProofImage } from "@/lib/storage"
+import { ProofPhotoModal } from "@/components/shared/proof-photo-modal"
+import { ProofImageBadge } from "@/components/shared/proof-image-badge"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { ChevronDown, Package, Clock, CheckCircle, Truck, Send, XCircle } from "lucide-react"
@@ -49,6 +52,8 @@ export function TransactionsList({ transactions, loading, userRole }: Transactio
   const [readyLoadingId, setReadyLoadingId] = useState<string | null>(null)
   const [pickupLoadingId, setPickupLoadingId] = useState<string | null>(null)
   const [localTransactions, setLocalTransactions] = useState<OrderDoc[]>(transactions)
+  const [readyProofTargetId, setReadyProofTargetId] = useState<string | null>(null)
+  const [pickupProofTargetId, setPickupProofTargetId] = useState<string | null>(null)
 
   useEffect(() => {
     // Failed/cancelled orders carry no real spend and are not actionable —
@@ -57,33 +62,31 @@ export function TransactionsList({ transactions, loading, userRole }: Transactio
     setLocalTransactions(visible)
   }, [transactions, userRole])
 
-  const handleMarkReadyForShip = async (orderId: string) => {
+  const handleMarkReadyForShipConfirm = async (orderId: string, file: File) => {
     setReadyLoadingId(orderId)
     try {
-      await markOrderReadyForPickup(orderId)
+      const proofUrl = await uploadProofImage(orderId, "ready_for_pickup", file)
+      await markOrderReadyForPickup(orderId, proofUrl)
       setLocalTransactions((prev) =>
         prev.map((t) =>
-          t.id === orderId ? { ...t, status: "ready_for_pickup" as const } : t
+          t.id === orderId ? { ...t, status: "ready_for_pickup" as const, readyForPickupProofUrl: proofUrl } : t
         )
       )
-    } catch (error) {
-      console.error("Failed to mark order ready for pickup:", error)
     } finally {
       setReadyLoadingId(null)
     }
   }
 
-  const handleMarkPickedUp = async (orderId: string) => {
+  const handleMarkPickedUpConfirm = async (orderId: string, file: File) => {
     setPickupLoadingId(orderId)
     try {
-      await markOrderPickedUp(orderId)
+      const proofUrl = await uploadProofImage(orderId, "picked_up", file)
+      await markOrderPickedUp(orderId, proofUrl)
       setLocalTransactions((prev) =>
         prev.map((t) =>
-          t.id === orderId ? { ...t, status: "picked_up" as const } : t
+          t.id === orderId ? { ...t, status: "picked_up" as const, pickedUpProofUrl: proofUrl } : t
         )
       )
-    } catch (error) {
-      console.error("Failed to mark order as picked up:", error)
     } finally {
       setPickupLoadingId(null)
     }
@@ -334,7 +337,14 @@ export function TransactionsList({ transactions, loading, userRole }: Transactio
                         ₹{transaction.amount.toFixed(2)}
                       </p>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 items-center">
+                      {transaction.readyForPickupProofUrl && (
+                        <ProofImageBadge url={transaction.readyForPickupProofUrl} label="Ready Proof" />
+                      )}
+                      {transaction.pickedUpProofUrl && (
+                        <ProofImageBadge url={transaction.pickedUpProofUrl} label="Pickup Proof" />
+                      )}
+
                       {/* Vendor: Ready for Ship — only when payment is confirmed and order not yet dispatched */}
                       {userRole === "vendor" &&
                         (transaction.status === "payment_confirmed" || transaction.status === "preparing") && (
@@ -344,7 +354,7 @@ export function TransactionsList({ transactions, loading, userRole }: Transactio
                             disabled={readyLoadingId === transaction.id}
                             onClick={(e) => {
                               e.stopPropagation()
-                              handleMarkReadyForShip(transaction.id ?? "")
+                              setReadyProofTargetId(transaction.id ?? null)
                             }}
                           >
                             <Send className="w-3.5 h-3.5" />
@@ -361,7 +371,7 @@ export function TransactionsList({ transactions, loading, userRole }: Transactio
                             disabled={pickupLoadingId === transaction.id}
                             onClick={(e) => {
                               e.stopPropagation()
-                              handleMarkPickedUp(transaction.id ?? "")
+                              setPickupProofTargetId(transaction.id ?? null)
                             }}
                           >
                             <Truck className="w-3.5 h-3.5" />
@@ -386,6 +396,30 @@ export function TransactionsList({ transactions, loading, userRole }: Transactio
           </Card>
         )}
       </div>
+
+      {/* Proof photo modal — required before "Ready for Ship" goes through */}
+      <ProofPhotoModal
+        open={Boolean(readyProofTargetId)}
+        onOpenChange={(open) => { if (!open) setReadyProofTargetId(null) }}
+        title="Mark Ready for Pickup"
+        description="Attach a photo of the packed order as proof before marking it ready for the organisation to collect."
+        confirmLabel="Confirm & Mark Ready"
+        onConfirm={async (file) => {
+          if (readyProofTargetId) await handleMarkReadyForShipConfirm(readyProofTargetId, file)
+        }}
+      />
+
+      {/* Proof photo modal — required before "Mark Picked Up" goes through */}
+      <ProofPhotoModal
+        open={Boolean(pickupProofTargetId)}
+        onOpenChange={(open) => { if (!open) setPickupProofTargetId(null) }}
+        title="Mark Picked Up"
+        description="Attach a photo confirming the order has been collected from the vendor as proof before marking it picked up."
+        confirmLabel="Confirm & Mark Picked Up"
+        onConfirm={async (file) => {
+          if (pickupProofTargetId) await handleMarkPickedUpConfirm(pickupProofTargetId, file)
+        }}
+      />
     </div>
   )
 }

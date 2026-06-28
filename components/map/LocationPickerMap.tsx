@@ -110,6 +110,16 @@ export function LocationPickerMap({
       delete (container as any)._leaflet_id
     }
 
+    // Guards against the init promise resolving — or a pending RAF/timeout
+    // firing — after this effect has already been cleaned up (unmount,
+    // isReady toggling, or React Strict Mode's double-invoke in dev).
+    // Without this, invalidateSize() can run on a map that .remove() already
+    // tore down, throwing "Cannot read properties of undefined (reading
+    // '_leaflet_pos')".
+    let disposed = false
+    let rafId: number | null = null
+    let invalidateTimer: ReturnType<typeof setTimeout> | null = null
+
     // Load CSS first, THEN import Leaflet and init the map.
     // If the stylesheet isn't fully parsed before L.map() runs, Leaflet
     // miscalculates tile sizes and the map renders blank.
@@ -117,7 +127,7 @@ export function LocationPickerMap({
       ensureLeafletCSS(),
       import("leaflet"),
     ]).then(([, L]) => {
-      if (!containerRef.current || mapRef.current) return
+      if (disposed || !containerRef.current || mapRef.current) return
 
       const centre: [number, number] = hasSavedPin
         ? [initialLat!, initialLng!]
@@ -146,19 +156,28 @@ export function LocationPickerMap({
 
       // Force Leaflet to re-measure the container after first paint.
       // Needed when the map is inside a scrollable card or was hidden on mount.
-      requestAnimationFrame(() => {
+      rafId = requestAnimationFrame(() => {
+        rafId = null
+        if (disposed) return
         map.invalidateSize({ animate: false })
         // Second pass after a short delay covers cases where the container
         // is still transitioning (e.g. a CSS animation on the settings card).
-        setTimeout(() => map.invalidateSize({ animate: false }), 300)
+        invalidateTimer = setTimeout(() => {
+          invalidateTimer = null
+          if (disposed) return
+          map.invalidateSize({ animate: false })
+        }, 300)
       })
 
       setMapStatus("ready")
     })
 
     return () => {
+      disposed = true
       initDoneRef.current = false
       markerRef.current = null
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      if (invalidateTimer !== null) clearTimeout(invalidateTimer)
       if (mapRef.current) {
         mapRef.current.remove()
         mapRef.current = null
@@ -174,15 +193,15 @@ export function LocationPickerMap({
     setGpsLoading(true)
     try {
       const loc = await getCurrentLocation()
+      if (!mapRef.current) return // unmounted (or map torn down) while we were waiting on GPS
       if (!loc) {
         alert("Could not get your GPS location. Please allow location access in your browser.")
         return
       }
-      if (mapRef.current) {
-        mapRef.current.setView([loc.lat, loc.lng], 17)
-        const L = await import("leaflet")
-        placeMarker(L, mapRef.current, loc)
-      }
+      mapRef.current.setView([loc.lat, loc.lng], 17)
+      const L = await import("leaflet")
+      if (!mapRef.current) return // re-check: unmount could've happened during the import too
+      placeMarker(L, mapRef.current, loc)
     } finally {
       setGpsLoading(false)
     }

@@ -3,6 +3,9 @@
 import { useEffect, useState, useMemo } from "react"
 import Link from "next/link"
 import { getDonorDonations, getOrganization, getDonorOrders, updateDonationStatus, type DonationDoc, type OrderDoc } from "@/lib/firestore"
+import { uploadProofImage } from "@/lib/storage"
+import { ProofPhotoModal } from "@/components/shared/proof-photo-modal"
+import { ProofImageBadge } from "@/components/shared/proof-image-badge"
 import { useAuth } from "@/lib/auth-context"
 import { StatusBadge } from "@/components/donor/status-badge"
 import { Spinner } from "@/components/ui/spinner"
@@ -169,6 +172,15 @@ function DonationDetailModal({
               </p>
             </div>
           )}
+
+          {/* Proof photos — shown once available for whichever steps have happened */}
+          {(donation.donateProofUrl || donation.completedProofUrl || order?.readyForPickupProofUrl) && (
+            <div className="mt-4 flex flex-wrap gap-2">
+              <ProofImageBadge url={donation.donateProofUrl} label="Donate Proof" />
+              <ProofImageBadge url={order?.readyForPickupProofUrl} label="Vendor Ready Proof" />
+              <ProofImageBadge url={donation.completedProofUrl} label="Completed Proof" />
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -237,6 +249,7 @@ export default function DonationsPage() {
   const [orgFilter, setOrgFilter] = useState<string>("All")
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("Completed")
   const [donateLoadingId, setDonateLoadingId] = useState<string | null>(null)
+  const [donateProofTargetId, setDonateProofTargetId] = useState<string | null>(null)
 
   useEffect(() => {
     if (!user?.uid) { setLoading(false); return }
@@ -262,11 +275,15 @@ export default function DonationsPage() {
       .catch(console.error)
   }, [user?.uid])
 
-  // Map donationId -> order, for quick lookup when opening the detail modal
+  // Map donationId -> order, for quick lookup when opening the detail modal,
+  // and to gate the "Donate" button (see action buttons below). Failed/cancelled
+  // orders are excluded so a donor whose vendor payment didn't go through can
+  // still retry "Find a Vendor & Pay" or fall back to "Donate" instead of being
+  // permanently stuck.
   const orderByDonationId = useMemo(() => {
     const map: Record<string, OrderDoc> = {}
     orders.forEach((o) => {
-      if (o.donationId) map[o.donationId] = o
+      if (o.donationId && o.status !== "failed") map[o.donationId] = o
     })
     return map
   }, [orders])
@@ -274,16 +291,16 @@ export default function DonationsPage() {
   // Donor confirms an approved donation is ready to ship — moves it to
   // ToBeConfirmed ("Awaiting Pickup"), where it shows up in the org's queue
   // and the donor's "To Be Completed" tab, until the org marks it Completed.
-  const handleDonate = async (donationId: string) => {
-    if (!donationId) return
+  // A proof photo is mandatory: clicking "Donate" opens a modal, and this
+  // only runs once the donor has attached a photo and confirmed in it.
+  const handleDonateConfirm = async (donationId: string, file: File) => {
     setDonateLoadingId(donationId)
     try {
-      await updateDonationStatus(donationId, "ToBeConfirmed")
+      const proofUrl = await uploadProofImage(donationId, "donate", file)
+      await updateDonationStatus(donationId, "ToBeConfirmed", undefined, proofUrl)
       setDonations((prev) =>
-        prev.map((d) => (d.id === donationId ? { ...d, status: "ToBeConfirmed" as const } : d))
+        prev.map((d) => (d.id === donationId ? { ...d, status: "ToBeConfirmed" as const, donateProofUrl: proofUrl } : d))
       )
-    } catch (error) {
-      console.error("Failed to mark donation as ready to ship:", error)
     } finally {
       setDonateLoadingId(null)
     }
@@ -535,10 +552,14 @@ export default function DonationsPage() {
 
                     {/* Action buttons for Approved donations:
                         - "Find a Vendor & Pay": shown on every Approved record (own-item included)
-                        - "Donate": shown on every Approved record; donor confirms the item/contribution
-                          is ready to ship, moving status to ToBeConfirmed ("Awaiting Pickup")
+                        - "Donate": shown ONLY when no vendor order exists yet for this donation.
+                          Once the donor has started "Find a Vendor & Pay" (an `orders` doc with
+                          this donationId exists), "Donate" must disappear — it unconditionally
+                          flips status to ToBeConfirmed, which would let a vendor-paid item jump
+                          straight to the org's "Complete" (self-ship) card before the vendor has
+                          even marked it ready, bypassing the whole vendor preparation/pickup flow.
                         Wrapper stacks on narrow screens and sits side-by-side on wider ones. */}
-                    {donation.status === "Approved" && donation.id && (
+                    {donation.status === "Approved" && donation.id && !orderByDonationId[donation.id] && (
                       <div className="mt-4 border-t border-border pt-4">
                         <div className="flex flex-col gap-2 sm:flex-row">
                           <Button
@@ -558,7 +579,7 @@ export default function DonationsPage() {
                             disabled={donateLoadingId === donation.id}
                             onClick={(e) => {
                               e.stopPropagation()
-                              handleDonate(donation.id ?? "")
+                              setDonateProofTargetId(donation.id ?? null)
                             }}
                           >
                             <HandHeart className="h-4 w-4" />
@@ -581,6 +602,18 @@ export default function DonationsPage() {
         orgName={selectedDonation ? (orgNames[selectedDonation.organizationId] ?? "—") : ""}
         order={selectedDonation?.id ? orderByDonationId[selectedDonation.id] : null}
         onClose={() => setSelectedDonation(null)}
+      />
+
+      {/* Proof photo modal — required before "Donate" goes through */}
+      <ProofPhotoModal
+        open={Boolean(donateProofTargetId)}
+        onOpenChange={(open) => { if (!open) setDonateProofTargetId(null) }}
+        title="Confirm Donation"
+        description="Attach a photo of the packed item as proof before marking this donation ready to ship."
+        confirmLabel="Confirm & Donate"
+        onConfirm={async (file) => {
+          if (donateProofTargetId) await handleDonateConfirm(donateProofTargetId, file)
+        }}
       />
     </div>
   )

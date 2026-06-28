@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import {
-  Package, Truck, CheckCircle2, Loader2, MapPin, Building2, Store,
+  Package, Truck, CheckCircle2, Loader2, MapPin, Store,
   Calendar, Hash, Gift, Mail, Phone,
 } from "lucide-react"
 import { useAuth } from "@/lib/auth-context"
@@ -18,6 +18,9 @@ import {
   type OrderDoc,
 } from "@/lib/firestore"
 import { Spinner } from "@/components/ui/spinner"
+import { uploadProofImage } from "@/lib/storage"
+import { ProofPhotoModal } from "@/components/shared/proof-photo-modal"
+import { ProofImageBadge } from "@/components/shared/proof-image-badge"
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -76,14 +79,31 @@ export default function ReadyToShipPage() {
   const [donationItems, setDonationItems] = useState<ReadyItem[]>([])
   const [orderItems, setOrderItems] = useState<ReadyItem[]>([])
   const [acting, setActing] = useState<string | null>(null)
+  const [completeProofTargetId, setCompleteProofTargetId] = useState<string | null>(null)
+  const [pickupProofTargetId, setPickupProofTargetId] = useState<string | null>(null)
 
   const loadAll = useCallback(async () => {
     if (!user?.uid) { setLoading(false); return }
     setLoading(true)
     try {
+      // ── Vendor-fulfilled items: paid orders the vendor has packed and
+      //    marked ready for the org to collect (ready_for_pickup) ──
+      // Loaded first so we can exclude any donation already represented
+      // by one of these orders (see filter below).
+      const orders = await getOrgOrders(user.uid)
+
       // ── Donor self-ship items: donations the org approved, where the
       //    donor has confirmed the item is packed and ready (ToBeConfirmed) ──
-      const donations = await getOrgDonations(user.uid, "ToBeConfirmed")
+      // A donation also flips to "ToBeConfirmed" when the donor pays a
+      // vendor via "Find a Vendor & Pay" (set by /api/payments/verify) —
+      // that case is already represented by its linked `orders` doc above,
+      // so it must NOT also show up here as a separate donor self-ship
+      // card, or the same donation appears twice on this page.
+      const donationIdsWithOrder = new Set(
+        orders.map((o) => o.donationId).filter(Boolean) as string[]
+      )
+      const allToBeConfirmed = await getOrgDonations(user.uid, "ToBeConfirmed")
+      const donations = allToBeConfirmed.filter((d) => !d.id || !donationIdsWithOrder.has(d.id))
       const uniqueDonorIds = [...new Set(donations.map((d) => d.donorId))]
       const donorEntries = await Promise.all(
         uniqueDonorIds.map(async (id) => {
@@ -113,7 +133,7 @@ export default function ReadyToShipPage() {
 
       // ── Vendor-fulfilled items: paid orders the vendor has packed and
       //    marked ready for the org to collect (ready_for_pickup) ──
-      const orders = await getOrgOrders(user.uid)
+      // (`orders` was already fetched above to build donationIdsWithOrder)
       const readyOrders = orders.filter((o) => o.status === "ready_for_pickup" && o.id)
       const uniqueVendorIds = [...new Set(readyOrders.map((o) => o.vendorId).filter(Boolean))]
       const vendorEntries = await Promise.all(
@@ -156,11 +176,12 @@ export default function ReadyToShipPage() {
     [donationItems, orderItems]
   )
 
-  const handleCompleteDonation = async (id: string) => {
+  const handleCompleteDonationConfirm = async (id: string, file: File) => {
     setActing(id)
     const item = donationItems.find((d) => d.id === id)
     try {
-      await updateDonationStatus(id, "Completed")
+      const proofUrl = await uploadProofImage(id, "completed", file)
+      await updateDonationStatus(id, "Completed", undefined, proofUrl)
       if (item?.kind === "donation") {
         await createNotification({
           userId: item.donation.donorId,
@@ -170,20 +191,17 @@ export default function ReadyToShipPage() {
         })
       }
       setDonationItems((prev) => prev.filter((d) => d.id !== id))
-    } catch (error) {
-      console.error("Failed to complete donation:", error)
     } finally {
       setActing(null)
     }
   }
 
-  const handleMarkPickedUp = async (id: string) => {
+  const handleMarkPickedUpConfirm = async (id: string, file: File) => {
     setActing(id)
     try {
-      await markOrderPickedUp(id)
+      const proofUrl = await uploadProofImage(id, "picked_up", file)
+      await markOrderPickedUp(id, proofUrl)
       setOrderItems((prev) => prev.filter((o) => o.id !== id))
-    } catch (error) {
-      console.error("Failed to mark order as picked up:", error)
     } finally {
       setActing(null)
     }
@@ -216,7 +234,7 @@ export default function ReadyToShipPage() {
           <p className="mt-1 text-2xl font-bold text-purple-600">{donationItems.length}</p>
         </div>
         <div className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
-          <p className="text-xs text-gray-400">From Vendors</p>
+          <p className="text-xs text-gray-400">Vendor-Prepared</p>
           <p className="mt-1 text-2xl font-bold text-blue-600">{orderItems.length}</p>
         </div>
       </div>
@@ -237,19 +255,43 @@ export default function ReadyToShipPage() {
                 key={`d-${item.id}`}
                 item={item}
                 isActing={acting === item.id}
-                onComplete={() => handleCompleteDonation(item.id)}
+                onComplete={() => setCompleteProofTargetId(item.id)}
               />
             ) : (
               <OrderReadyCard
                 key={`o-${item.id}`}
                 item={item}
                 isActing={acting === item.id}
-                onPickedUp={() => handleMarkPickedUp(item.id)}
+                onPickedUp={() => setPickupProofTargetId(item.id)}
               />
             )
           )}
         </div>
       )}
+
+      {/* Proof photo modal — required before "Complete" goes through */}
+      <ProofPhotoModal
+        open={Boolean(completeProofTargetId)}
+        onOpenChange={(open) => { if (!open) setCompleteProofTargetId(null) }}
+        title="Complete Donation"
+        description="Attach a photo confirming the item has been received as proof before marking this donation complete."
+        confirmLabel="Confirm & Complete"
+        onConfirm={async (file) => {
+          if (completeProofTargetId) await handleCompleteDonationConfirm(completeProofTargetId, file)
+        }}
+      />
+
+      {/* Proof photo modal — required before "Mark Picked Up" goes through */}
+      <ProofPhotoModal
+        open={Boolean(pickupProofTargetId)}
+        onOpenChange={(open) => { if (!open) setPickupProofTargetId(null) }}
+        title="Mark Picked Up"
+        description="Attach a photo confirming the order has been collected from the vendor as proof before marking it picked up."
+        confirmLabel="Confirm & Mark Picked Up"
+        onConfirm={async (file) => {
+          if (pickupProofTargetId) await handleMarkPickedUpConfirm(pickupProofTargetId, file)
+        }}
+      />
     </div>
   )
 }
@@ -320,6 +362,12 @@ function DonationReadyCard({
               <MapPin className="h-4 w-4 shrink-0 mt-0.5 text-gray-400" />
               <span>{item.address}</span>
             </div>
+
+            {d.donateProofUrl && (
+              <div className="mt-2">
+                <ProofImageBadge url={d.donateProofUrl} label="Donor Proof" />
+              </div>
+            )}
           </div>
         </div>
 
@@ -360,18 +408,18 @@ function OrderReadyCard({
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 flex-wrap">
-              <h3 className="font-semibold text-gray-900">{o.vendorName ?? "Vendor"}</h3>
+              <h3 className="font-semibold text-gray-900">
+                {o.donorName ? `${o.donorName}'s Order` : "Donor Order"}
+              </h3>
               <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-semibold text-blue-700">
-                From Vendor
+                Prepared by Vendor
               </span>
             </div>
             <p className="text-xs text-gray-400 mt-0.5">Order #{o.orderId}</p>
-            {o.donorName && (
-              <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
-                <Building2 className="h-3 w-3 shrink-0" />
-                Donated by {o.donorName}
-              </p>
-            )}
+            <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
+              <Store className="h-3 w-3 shrink-0" />
+              Vendor: {o.vendorName ?? "—"}
+            </p>
 
             <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-600">
               <span className="inline-flex items-center gap-1.5">
@@ -393,6 +441,12 @@ function OrderReadyCard({
               <MapPin className="h-4 w-4 shrink-0 mt-0.5 text-gray-400" />
               <span>{item.address}</span>
             </div>
+
+            {o.readyForPickupProofUrl && (
+              <div className="mt-2">
+                <ProofImageBadge url={o.readyForPickupProofUrl} label="Vendor Proof" />
+              </div>
+            )}
           </div>
         </div>
 

@@ -1,5 +1,8 @@
 // lib/storage.ts
-// Firebase Storage utility for uploading organization images
+// Firebase Storage utility for uploading organization images.
+// Proof-of-action photos (uploadProofImage, below) no longer use Storage —
+// they're compressed to base64 and stored directly in Firestore, the same
+// pattern OrgImageUpload / lib/imageUtils.ts already uses for org photos.
 
 import {
   ref,
@@ -8,6 +11,7 @@ import {
   deleteObject,
 } from "firebase/storage"
 import { storage } from "./firebase"
+import { fileToCompressedDataURL, approxBase64Bytes } from "./imageUtils"
 
 /**
  * Compress an image file using canvas before uploading.
@@ -125,6 +129,52 @@ export async function deleteOrgImage(orgId: string): Promise<void> {
   } catch {
     // File didn't exist — that's fine
   }
+}
+
+/**
+ * Convert a proof-of-action photo (donor "Donate", vendor "Mark Ready for
+ * Pickup", org "Mark Picked Up" / "Complete") into a compressed base64 JPEG
+ * data URL — same approach as lib/imageUtils.ts's fileToCompressedDataURL,
+ * used by org gallery photos. No Firebase Storage involved: the resulting
+ * data URL is written directly onto the donation/order doc's *ProofUrl
+ * field by markOrderReadyForPickup / markOrderPickedUp / the donor "Donate"
+ * handler, the same way upsertOrganization writes photoURLs.
+ *
+ * Kept under Firestore's 1MB document limit with margin, since (unlike
+ * photoURLs, which can hold several images) each proof field holds exactly
+ * one data URL — see MAX_PROOF_BYTES below.
+ *
+ * @param recordId - The donations/{id} or orders/{id} document id (kept in
+ *                    the signature for compatibility with existing callers;
+ *                    no longer used to build a Storage path)
+ * @param action   - Which step this proof is for, e.g. "donate", "ready_for_pickup", "picked_up", "completed"
+ * @param file     - The image File object from an <input type="file">
+ */
+export async function uploadProofImage(
+  recordId: string,
+  action: string,
+  file: File
+): Promise<string> {
+  const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"]
+  if (!allowed.includes(file.type)) {
+    throw new Error("Only JPEG, PNG, WebP or GIF images are allowed.")
+  }
+
+  const MAX_SOURCE_MB = 8
+  if (file.size > MAX_SOURCE_MB * 1024 * 1024) {
+    throw new Error(`Image must be smaller than ${MAX_SOURCE_MB} MB.`)
+  }
+
+  const dataUrl = await fileToCompressedDataURL(file)
+
+  // Soft cap so a single proof photo can't approach Firestore's 1MB
+  // document limit (the order/donation doc has other fields too).
+  const MAX_PROOF_BYTES = 700 * 1024
+  if (approxBase64Bytes(dataUrl) > MAX_PROOF_BYTES) {
+    throw new Error("That photo is too large even after compression. Please try a different photo.")
+  }
+
+  return dataUrl
 }
 
 /**

@@ -144,14 +144,28 @@ export function FindVendorStepB({
         onSuccess: () => {
           setStatus("success")
         },
-        onError: (error: any) => {
+        onError: async (error: any) => {
           // Mark the pre-created order as failed so it doesn't appear
-          // as a live order to the vendor or org
+          // as a live/paid order to the vendor or org, and so it's
+          // excluded from the donor's transaction history (which already
+          // hides status === "failed"). Awaited (not fire-and-forget) so
+          // we know definitively whether the order was actually marked
+          // failed before deciding what to tell the donor.
+          let markedFailed = true
           if (newOrderId) {
-            markOrderFailed(newOrderId).catch(console.error)
+            try {
+              await markOrderFailed(newOrderId)
+            } catch (markError) {
+              console.error("Failed to mark order as failed:", markError)
+              markedFailed = false
+            }
           }
+
+          const baseMessage = error instanceof Error ? error.message : "Payment was cancelled"
           setErrorMessage(
-            error instanceof Error ? error.message : "Payment was cancelled"
+            markedFailed
+              ? baseMessage
+              : `${baseMessage} (could not clean up the pending order — please contact support so you are not charged)`
           )
           setStatus("error")
         },

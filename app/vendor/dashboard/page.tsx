@@ -15,6 +15,9 @@ import {
   type VendorDoc,
   type OrderDoc,
 } from '@/lib/firestore'
+import { uploadProofImage } from '@/lib/storage'
+import { ProofPhotoModal } from '@/components/shared/proof-photo-modal'
+import { ProofImageBadge } from '@/components/shared/proof-image-badge'
 
 interface OrderWithDetails extends OrderDoc {
   isExpanded: boolean
@@ -28,6 +31,7 @@ export default function VendorDashboard() {
   const [orders, setOrders] = useState<OrderWithDetails[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [readyProofTargetId, setReadyProofTargetId] = useState<string | null>(null)
 
   useEffect(() => {
     if (!vendorId) return
@@ -81,19 +85,14 @@ export default function VendorDashboard() {
   const readyForPickup = orders.filter((o) => o.status === 'ready_for_pickup').length
   const totalAmount = orders.reduce((sum, o) => sum + o.amount, 0)
 
-  const handleMarkReady = async (orderId: string) => {
-    if (!orderId) return
-    try {
-      await markOrderReadyForPickup(orderId)
-      setOrders((prev) =>
-        prev.map((order) =>
-          order.id === orderId ? { ...order, status: 'ready_for_pickup' } : order
-        )
+  const handleMarkReadyConfirm = async (orderId: string, file: File) => {
+    const proofUrl = await uploadProofImage(orderId, "ready_for_pickup", file)
+    await markOrderReadyForPickup(orderId, proofUrl)
+    setOrders((prev) =>
+      prev.map((order) =>
+        order.id === orderId ? { ...order, status: 'ready_for_pickup', readyForPickupProofUrl: proofUrl } : order
       )
-    } catch (error) {
-      console.error('Error marking order ready:', error)
-      alert('Failed to update order status')
-    }
+    )
   }
 
   const toggleOrderDetails = (orderId: string) => {
@@ -114,8 +113,7 @@ export default function VendorDashboard() {
             <h1 className="text-2xl font-bold text-white md:text-3xl">Vendor Dashboard</h1>
             <p className="mt-2 text-sm text-white/80">{vendor.businessName}</p>
           </div>
-          <Button variant="secondary" size="sm">Profile Settings</Button>
-        </div>
+                  </div>
       </div>
 
       {/* Verification Banner */}
@@ -240,11 +238,14 @@ export default function VendorDashboard() {
                       {order.status !== 'ready_for_pickup' && order.status !== 'picked_up' && (
                         <Button
                           size="sm"
-                          onClick={() => handleMarkReady(order.id ?? '')}
+                          onClick={() => setReadyProofTargetId(order.id ?? null)}
                           className="flex-1"
                         >
                           Mark Ready for Pickup
                         </Button>
+                      )}
+                      {order.readyForPickupProofUrl && (
+                        <ProofImageBadge url={order.readyForPickupProofUrl} label="Ready Proof" />
                       )}
                       <Button size="sm" variant="outline" className="flex-1">
                         Print Label
@@ -257,6 +258,18 @@ export default function VendorDashboard() {
           </div>
         )}
       </div>
+
+      {/* Proof photo modal — required before "Mark Ready for Pickup" goes through */}
+      <ProofPhotoModal
+        open={Boolean(readyProofTargetId)}
+        onOpenChange={(open) => { if (!open) setReadyProofTargetId(null) }}
+        title="Mark Ready for Pickup"
+        description="Attach a photo of the packed order as proof before marking it ready for the organisation to collect."
+        confirmLabel="Confirm & Mark Ready"
+        onConfirm={async (file) => {
+          if (readyProofTargetId) await handleMarkReadyConfirm(readyProofTargetId, file)
+        }}
+      />
     </div>
   )
 }

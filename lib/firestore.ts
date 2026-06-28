@@ -171,6 +171,12 @@ export interface OrderDoc {
   receiverAddress: string
   notes?: string
   updatedAt?: Timestamp
+  /** Proof photo the vendor attached when marking this order "ready for
+   *  pickup" — required before the action is allowed to go through. */
+  readyForPickupProofUrl?: string
+  /** Proof photo the org attached when marking this order "picked up" —
+   *  required before the action is allowed to go through. */
+  pickedUpProofUrl?: string
 }
 
 export interface PaymentDoc {
@@ -262,6 +268,12 @@ export interface DonationDoc {
   originalQuantity?: number
   /** True for donor-initiated own-item donations (not linked to org requirements) */
   isOwnItem?: boolean
+  /** Proof photo the donor attached when clicking "Donate" (self-ship
+   *  confirmation) — required before the action is allowed to go through. */
+  donateProofUrl?: string
+  /** Proof photo the org attached when marking this donation "Completed" —
+   *  required before the action is allowed to go through. */
+  completedProofUrl?: string
 }
 
 export interface SponsorshipRequestDoc {
@@ -301,7 +313,7 @@ export interface ReviewDoc {
   id?: string
   userId: string
   userName: string
-  userRole: "donor" | "organization"
+  userRole: "donor" | "organization" | "vendor"
   photoURL?: string
   rating: number
   comment: string
@@ -870,13 +882,20 @@ export async function getDonorItems(donorId: string): Promise<DonorItemDoc[]> {
 export async function updateDonationStatus(
   donationId: string,
   status: DonationDoc["status"],
-  notes?: string
+  notes?: string,
+  proofUrl?: string
 ) {
   const update: DocumentData = sanitizeData({
     status,
     notes,
     updatedAt: serverTimestamp(),
     ...(status === "Completed" ? { completedAt: serverTimestamp() } : {}),
+    // Proof photo is required by the UI before this call is ever made for
+    // these two transitions — stored under a status-specific field so a
+    // donation's full proof history (donate + completed) is preserved
+    // rather than one overwriting the other.
+    ...(status === "ToBeConfirmed" && proofUrl ? { donateProofUrl: proofUrl } : {}),
+    ...(status === "Completed" && proofUrl ? { completedProofUrl: proofUrl } : {}),
   } as Record<string, unknown>)
   await updateDoc(doc(db, "donations", donationId), update)
 }
@@ -1506,26 +1525,31 @@ export async function markOrderFailed(orderId: string) {
   })
 }
 
-export async function markOrderReadyForPickup(orderId: string) {
+export async function markOrderReadyForPickup(orderId: string, proofUrl: string) {
   await updateDoc(doc(db, "orders", orderId), {
     status: "ready_for_pickup",
+    readyForPickupProofUrl: proofUrl,
     updatedAt: serverTimestamp(),
   })
 }
 
-export async function markOrderPickedUp(orderId: string) {
+export async function markOrderPickedUp(orderId: string, proofUrl: string) {
   const orderRef = doc(db, "orders", orderId)
   const orderSnap = await getDoc(orderRef)
   await updateDoc(orderRef, {
     status: "picked_up",
+    pickedUpProofUrl: proofUrl,
     updatedAt: serverTimestamp(),
   })
-  // If this order is linked to a donation, mark it Completed too
+  // If this order is linked to a donation, mark it Completed too — the
+  // same pickup photo serves as proof for both, since picking up the
+  // order from the vendor IS the donation being completed.
   if (orderSnap.exists()) {
     const donationId = orderSnap.data()?.donationId
     if (donationId) {
       await updateDoc(doc(db, "donations", donationId), {
         status: "Completed",
+        completedProofUrl: proofUrl,
         completedAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       })

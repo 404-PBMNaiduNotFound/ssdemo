@@ -41,10 +41,12 @@ function ReviewCard({ review }: { review: ReviewDoc }) {
             className={`inline-block text-xs font-medium px-2 py-0.5 rounded-full mt-0.5 ${
               review.userRole === "donor"
                 ? "bg-blue-50 text-blue-700"
+                : review.userRole === "vendor"
+                ? "bg-orange-50 text-orange-700"
                 : "bg-green-50 text-green-700"
             }`}
           >
-            {review.userRole === "donor" ? "Donor" : "Organizer"}
+            {review.userRole === "donor" ? "Donor" : review.userRole === "vendor" ? "Vendor" : "Organizer"}
           </span>
         </div>
       </div>
