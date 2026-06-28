@@ -21,8 +21,7 @@ export function Hero() {
             </h1>
 
             <p className="mt-5 max-w-xl text-pretty text-lg leading-relaxed text-muted-foreground">
-              SevaSetu is a smart platform that bridges compassionate donors with NGOs who need them most. Sponsor meals for specific dates, fulfill item requirements like food and essentials, and track every contribution in real time.
-              Organizations can manage sponsorship slots, post requirements, and approve donations seamlessly. Together, we turn small acts of giving into powerful, coordinated impact.
+              SevaSetu is a smart donation platform that connects three key people — <strong className="text-foreground">Donors</strong> who want to give, <strong className="text-foreground">Vendors</strong> who supply and prepare essentials, and <strong className="text-foreground">Organizations</strong> that deliver them to people in need. Sponsor meals for specific dates, fulfill item requirements, pay vendors securely via Razorpay, and watch every step confirmed with photo proof — all in one place.
             </p>
 
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
@@ -62,8 +61,8 @@ export function Hero() {
               </div>
               <div className="hidden h-10 w-px bg-border sm:block" />
               <div>
-                <p className="text-2xl font-extrabold text-foreground">Real</p>
-                <p className="text-sm text-muted-foreground">Impact tracked</p>
+                <p className="text-2xl font-extrabold text-foreground">Photo</p>
+                <p className="text-sm text-muted-foreground">Proof at every step</p>
               </div>
             </div>
           </div>

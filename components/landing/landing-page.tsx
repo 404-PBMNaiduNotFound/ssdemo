@@ -3,9 +3,11 @@ import { Hero } from "./hero"
 import { Stats } from "./stats"
 import { FeaturedOrganizations } from "./featured-organizations"
 import { HowItWorks } from "./how-it-works"
+import { HowTheFlowWorks } from "./how-the-flow-works"
 import { RoleCards } from "./role-cards"
-import { Footer } from "./footer"
+import { PaymentAndLocation } from "./payment-and-location"
 import { ReviewCarousel } from "./review-carousel"
+import { Footer } from "./footer"
 
 export function LandingPage() {
   return (
@@ -16,11 +18,12 @@ export function LandingPage() {
         <Stats />
         <FeaturedOrganizations />
         <HowItWorks />
+        <HowTheFlowWorks />
         <RoleCards />
+        <PaymentAndLocation />
         <ReviewCarousel />
       </main>
       <Footer />
     </div>
   )
 }
-

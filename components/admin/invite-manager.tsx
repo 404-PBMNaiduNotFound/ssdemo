@@ -25,14 +25,19 @@ function inviteLink(token: string) {
 
 function timeAgo(ts: any): string {
   if (!ts) return "—"
+  // serverTimestamp() returns a sentinel object immediately after write
+  // (before Firestore confirms). It has no .seconds and no .toDate().
+  // Guard against this so we never show "NaNd ago".
+  if (typeof ts === "object" && ts._methodName === "serverTimestamp") return "just now"
   const date: Date =
     typeof ts.toDate === "function"
       ? ts.toDate()
       : typeof ts.seconds === "number"
         ? new Date(ts.seconds * 1000)
         : new Date(ts)
+  if (!date || isNaN(date.getTime())) return "just now"
   const diff = Math.floor((Date.now() - date.getTime()) / 1000)
-  if (diff < 60)   return "just now"
+  if (diff < 60)    return "just now"
   if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
   return `${Math.floor(diff / 86400)}d ago`

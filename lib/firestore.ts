@@ -313,7 +313,7 @@ export interface ReviewDoc {
   id?: string
   userId: string
   userName: string
-  userRole: "donor" | "organization" | "vendor"
+  userRole: "donor" | "organization"
   photoURL?: string
   rating: number
   comment: string
@@ -602,12 +602,14 @@ export async function getSlots(filters?: {
   organizationId?: string
   status?: string
   date?: string
+  dateFrom?: string
 }): Promise<SlotDoc[]> {
   const constraints: QueryConstraint[] = []
   if (filters?.organizationId)
     constraints.push(where("organizationId", "==", filters.organizationId))
   if (filters?.status) constraints.push(where("status", "==", filters.status))
   if (filters?.date) constraints.push(where("date", "==", filters.date))
+  if (filters?.dateFrom) constraints.push(where("date", ">=", filters.dateFrom))
   constraints.push(orderBy("date", "asc"))
 
   const q = query(collection(db, "slots"), ...constraints)

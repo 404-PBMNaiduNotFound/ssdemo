@@ -1,13 +1,10 @@
-import { Users, Building2, Globe2, HandCoins } from "lucide-react"
+import { Users, Building2, ShieldCheck, Store } from "lucide-react"
 
-// Stats show platform value propositions without fake numbers.
-// When real aggregated data is available (e.g. from a Cloud Function or
-// analytics collection), replace the `value` strings with live fetched data.
 const stats = [
-  { icon: HandCoins, value: "100%", label: "Donation transparency" },
+  { icon: ShieldCheck, value: "100%", label: "Donation transparency" },
   { icon: Building2, value: "Verified", label: "Organizations only" },
   { icon: Users, value: "Growing", label: "Donor community" },
-  { icon: Globe2, value: "Real", label: "Impact tracked" },
+  { icon: Store, value: "Local", label: "Vendor network" },
 ]
 
 export function Stats() {

@@ -50,9 +50,20 @@ function tsToDate(ts: any): Date | null {
   return null
 }
 
+type RecommendedTier = "high" | "medium" | "low"
+
 type RecommendedItem =
-  | { type: "requirement"; req: RequirementDoc; org: OrganizationDoc }
-  | { type: "slot"; slot: SlotDoc; org: OrganizationDoc }
+  | { type: "requirement"; req: RequirementDoc; org: OrganizationDoc; tier: RecommendedTier; tierLabel: string }
+  | { type: "slot"; slot: SlotDoc; org: OrganizationDoc; tier: RecommendedTier; tierLabel: string }
+
+// Compute local date strings once at module scope to avoid repetition.
+// Uses local date parts (not toISOString / UTC) so IST/+5:30 doesn't shift the date.
+function localDateStr(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  const day = String(d.getDate()).padStart(2, "0")
+  return `${y}-${m}-${day}`
+}
 
 export default function DashboardPage() {
   const { user, userDoc } = useAuth()
@@ -64,18 +75,30 @@ export default function DashboardPage() {
   const [loading, setLoading]             = useState(true)
   const [orgFilter, setOrgFilter]         = useState<string>("All")
 
+  // Date strings computed once per render for slot card labels
+  const todayDateStr   = localDateStr(new Date())
+  const tomorrowDateStr = (() => { const d = new Date(); d.setDate(d.getDate() + 1); return localDateStr(d) })()
+
   useEffect(() => {
     if (!user?.uid) return
     async function load() {
       setLoading(true)
       try {
+        const tomorrow = (() => {
+          const t = new Date()
+          t.setDate(t.getDate() + 1)
+          return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`
+        })()
+        console.log("[Dashboard] fetching slots with dateFrom:", tomorrow)
+
         const [donationsData, orgsData, reqsData, slotsData, ordersData] = await Promise.all([
           getDonorDonations(user!.uid),
           getOrganizations(),
           getRequirements(),
-          getSlots(),
+          getSlots({ dateFrom: tomorrow }),
           getDonorOrders(user!.uid),
         ])
+        console.log("[Dashboard] slots received:", slotsData.map(s => ({ id: s.id, date: s.date, status: s.status })))
         setDonations(donationsData)
         setOrganizations(orgsData)
         setRequirements(reqsData)
@@ -92,13 +115,13 @@ export default function DashboardPage() {
 
   const orgMap = useMemo(() => {
     const m = new Map<string, OrganizationDoc>()
-    organizations.forEach(o => m.set(o.uid || o.orgId || "", o))
+    organizations.forEach((o: OrganizationDoc) => m.set(o.uid || o.orgId || "", o))
     return m
   }, [organizations])
 
   // Only completed donations
   const completedDonations = useMemo(
-    () => donations.filter(d => d.status === "Completed"),
+    () => donations.filter((d: DonationDoc) => d.status === "Completed"),
     [donations]
   )
 
@@ -106,7 +129,7 @@ export default function DashboardPage() {
   // order (if any) that carries its real item cost — same as the Impact page.
   const orderByDonationId = useMemo(() => {
     const map: Record<string, OrderDoc> = {}
-    orders.forEach((o) => { if (o.donationId) map[o.donationId] = o })
+    orders.forEach((o: OrderDoc) => { if (o.donationId) map[o.donationId] = o })
     return map
   }, [orders])
 
@@ -116,7 +139,7 @@ export default function DashboardPage() {
   // their cost on the matching orders.amount instead (donations.amount is 0 in that case)
   // — so fall back to the linked order's amount whenever the donation itself has none.
   const totalAmountDonated = useMemo(() => {
-    return completedDonations.reduce((s, d) => {
+    return completedDonations.reduce((s: number, d: DonationDoc) => {
       const donationAmount = d.amount ?? 0
       const orderAmount = d.id ? orderByDonationId[d.id]?.amount ?? 0 : 0
       return s + (donationAmount > 0 ? donationAmount : orderAmount)
@@ -125,21 +148,21 @@ export default function DashboardPage() {
 
   // Unique orgs that have completed donations
   const completedOrgs = useMemo(() => {
-    const orgIds = [...new Set(completedDonations.map(d => d.organizationId))]
-    return orgIds.map(id => {
+    const orgIds = [...new Set(completedDonations.map((d: DonationDoc) => d.organizationId))] as string[]
+    return orgIds.map((id: string) => {
       const org = orgMap.get(id)
       const name = org?.organizationName || org?.name || id.slice(0, 10) + "…"
-      return { id, name, count: completedDonations.filter(d => d.organizationId === id).length }
+      return { id, name, count: completedDonations.filter((d: DonationDoc) => d.organizationId === id).length }
     })
   }, [completedDonations, orgMap])
 
   // Filtered completed donations by org tab
   const filteredDonations = useMemo(() => {
     if (orgFilter === "All") return completedDonations
-    return completedDonations.filter(d => d.organizationId === orgFilter)
+    return completedDonations.filter((d: DonationDoc) => d.organizationId === orgFilter)
   }, [completedDonations, orgFilter])
 
-  // Recommendations: location match = top priority, then most recently posted
+  // Recommendations: tiered by priority, 2-day slot window, and location
   const recommended = useMemo((): RecommendedItem[] => {
     const userCity  = (userDoc as any)?.city?.trim().toLowerCase() ?? ""
     const userState = (userDoc as any)?.state?.trim().toLowerCase() ?? ""
@@ -153,76 +176,111 @@ export default function DashboardPage() {
       return 2
     }
 
+    function isNearby(org: OrganizationDoc): boolean {
+      return locationScore(org) <= 1
+    }
+
     const now = new Date()
-    const todayStr = now.toISOString().split("T")[0]
+    // Build date strings from LOCAL date parts to avoid UTC offset shifting the date
+    // (toISOString() returns UTC, which in IST/+5:30 would give yesterday's date)
+    const todayStr = localDateStr(now)
 
-    const twoDaysLaterDate = new Date()
-    twoDaysLaterDate.setDate(now.getDate() + 2)
-    const twoDaysLaterStr = twoDaysLaterDate.toISOString().split("T")[0]
+    const tomorrowDate = new Date(now)
+    tomorrowDate.setDate(now.getDate() + 1)
+    const tomorrowStr = localDateStr(tomorrowDate)
 
-    const twoDaysAgoDate = new Date()
-    twoDaysAgoDate.setDate(now.getDate() - 2)
+    console.log("[Recommended] todayStr:", todayStr, "tomorrowStr:", tomorrowStr)
+    console.log("[Recommended] all slots in state:", slots.map(s => s.date))
 
-    const reqItems = requirements
-      .filter(r => r.status === "Open" && (r.fulfilledQuantity || 0) === 0)
-      .map(r => {
+    // ── TIER 1: HIGH priority requirements (top 2, location-sorted) ──────────
+    type ReqEntry = { req: RequirementDoc; org: OrganizationDoc; locScore: number }
+    type SlotEntry = { slot: SlotDoc; org: OrganizationDoc; locScore: number; isNear: boolean }
+
+    const highReqs = requirements
+      .filter((r: RequirementDoc) =>
+        r.status === "Open" &&
+        (r.fulfilledQuantity || 0) < (r.totalQuantity || 1) &&
+        r.priority === "High"
+      )
+      .map((r: RequirementDoc): ReqEntry | null => {
         const org = orgMap.get(r.organizationId)
         if (!org) return null
-        const reqDate = tsToDate(r.createdAt)
-        const isPrimary = reqDate ? reqDate >= twoDaysAgoDate : false
-        return {
-          type: "requirement" as const,
-          req: r,
-          org,
-          isPrimary,
-          dateValue: reqDate?.getTime() ?? 0,
-          location: locationScore(org)
-        }
+        return { req: r, org, locScore: locationScore(org) }
       })
-      .filter((x): x is NonNullable<typeof x> => x !== null)
+      .filter((x: ReqEntry | null): x is ReqEntry => x !== null)
+      .sort((a: ReqEntry, b: ReqEntry) => a.locScore - b.locScore)
+      .slice(0, 2)
+      .map(({ req, org }: ReqEntry): RecommendedItem => ({
+        type: "requirement",
+        req,
+        org,
+        tier: "high",
+        tierLabel: "🔴 Urgent Need",
+      }))
 
-    const slotItems = slots
-      .filter(s => s.status === "Available" && (s.sponsored || 0) === 0)
-      .map(s => {
+    // ── TIER 2: MEDIUM – advance-bookable slots (date >= minBookableDate = tomorrow+) ──
+    // Mirrors the sponsor form: slot.date must be >= getMinBookableDate() (today + SPONSORSHIP_LEAD_TIME_DAYS)
+    // No upper-bound cap — show all future bookable slots, sorted nearest first.
+    const upcomingSlots = slots
+      .filter((s: SlotDoc) =>
+        (s.status === "Available" || s.status === "Partially Filled") &&
+        s.date > todayStr
+      )
+      .map((s: SlotDoc): SlotEntry | null => {
         const org = orgMap.get(s.organizationId)
         if (!org) return null
-        const isPrimary = s.date >= todayStr && s.date <= twoDaysLaterStr
-        return {
-          type: "slot" as const,
-          slot: s,
-          org,
-          isPrimary,
-          dateValue: new Date(s.date).getTime() || 0,
-          location: locationScore(org)
-        }
+        return { slot: s, org, locScore: locationScore(org), isNear: isNearby(org) }
       })
-      .filter((x): x is NonNullable<typeof x> => x !== null)
+      .filter((x: SlotEntry | null): x is SlotEntry => x !== null)
+      .sort((a: SlotEntry, b: SlotEntry) => {
+        // Nearby first, then by date ascending (today before tomorrow)
+        if (a.locScore !== b.locScore) return a.locScore - b.locScore
+        return a.slot.date.localeCompare(b.slot.date)
+      })
+      .slice(0, 2)
+      .map(({ slot, org, isNear }: SlotEntry): RecommendedItem => {
+        const isTomorrow = slot.date === tomorrowStr
+        const tierLabel = isTomorrow
+          ? (isNear ? "📍 Tomorrow · Nearby" : "📅 Tomorrow")
+          : (isNear ? "📍 Upcoming · Nearby" : "📅 Upcoming")
+        return { type: "slot", slot, org, tier: "medium", tierLabel }
+      })
 
-    const sorted = [...reqItems, ...slotItems].sort((a, b) => {
-      // 1. High priority requirements on top
-      const aPriority = a.type === "requirement" && a.req.priority === "High" ? 0 : 1
-      const bPriority = b.type === "requirement" && b.req.priority === "High" ? 0 : 1
-      if (aPriority !== bPriority) {
-        return aPriority - bPriority
-      }
-      // 2. Location match
-      if (a.location !== b.location) {
-        return a.location - b.location
-      }
-      // 3. Primary (within 2 days) vs Fallback
-      if (a.isPrimary !== b.isPrimary) {
-        return a.isPrimary ? -1 : 1
-      }
-      // 4. Recency / nearest date
-      return b.dateValue - a.dateValue
-    })
+    // ── TIER 3: LOW – remaining Medium priority requirements, location-sorted ──
+    const highReqIds = new Set(highReqs.map((i: RecommendedItem) => i.type === "requirement" ? i.req.id : ""))
+    const mediumReqs = requirements
+      .filter((r: RequirementDoc) =>
+        r.status === "Open" &&
+        (r.fulfilledQuantity || 0) < (r.totalQuantity || 1) &&
+        r.priority === "Medium" &&
+        !highReqIds.has(r.id)
+      )
+      .map((r: RequirementDoc): ReqEntry | null => {
+        const org = orgMap.get(r.organizationId)
+        if (!org) return null
+        return { req: r, org, locScore: locationScore(org) }
+      })
+      .filter((x: ReqEntry | null): x is ReqEntry => x !== null)
+      .sort((a: ReqEntry, b: ReqEntry) => a.locScore - b.locScore)
+      .slice(0, 2)
+      .map(({ req, org, locScore }: ReqEntry): RecommendedItem => ({
+        type: "requirement",
+        req,
+        org,
+        tier: "low",
+        tierLabel: locScore === 0 ? "🟡 Medium · Your City" : locScore === 1 ? "🟡 Medium · Your State" : "🟡 Medium Priority",
+      }))
 
-    return sorted.map(item => {
-      if (item.type === "requirement") {
-        return { type: "requirement" as const, req: item.req, org: item.org }
-      } else {
-        return { type: "slot" as const, slot: item.slot, org: item.org }
-      }
+    // Merge tiers; cap total at 4 visible cards
+    const merged = [...highReqs, ...upcomingSlots, ...mediumReqs]
+
+    // De-duplicate (same id shouldn't appear twice)
+    const seen = new Set<string>()
+    return merged.filter((item: RecommendedItem) => {
+      const key = item.type === "requirement" ? `req-${item.req.id}` : `slot-${item.slot.id}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
     }).slice(0, 4)
   }, [requirements, slots, orgMap, userDoc])
 
@@ -307,7 +365,7 @@ export default function DashboardPage() {
                 >
                   All <span className="ml-1 text-xs">{completedDonations.length}</span>
                 </button>
-                {completedOrgs.map(org => (
+                {completedOrgs.map((org: { id: string; name: string; count: number }) => (
                   <button
                     key={org.id}
                     onClick={() => setOrgFilter(org.id)}
@@ -328,7 +386,7 @@ export default function DashboardPage() {
               {filteredDonations.length === 0 ? (
                 <p className="py-4 text-sm text-muted-foreground">No completed donations yet.</p>
               ) : (
-                filteredDonations.map((d) => {
+                filteredDonations.map((d: DonationDoc) => {
                   const org = orgMap.get(d.organizationId)
                   const orgName = org?.organizationName || org?.name || "Organization"
                   return (
@@ -352,25 +410,25 @@ export default function DashboardPage() {
             </ul>
           </div>
 
-          {/* Recommended — untouched */}
+          {/* Recommended — only shown when there are actionable items */}
+          {recommended.length > 0 && (
           <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
             <div className="mb-5 flex items-center gap-2">
               <Sparkles className="h-5 w-5 text-primary" />
               <h2 className="text-lg font-bold text-foreground">Recommended For You</h2>
             </div>
 
-            {recommended.length === 0 ? (
-              <div className="flex flex-col items-center gap-3 py-8 text-center">
-                <p className="text-sm text-muted-foreground">No open requirements or slots right now.</p>
-                <Button asChild size="sm" variant="outline" className="rounded-xl">
-                  <Link href="/donor/browse">Browse Organizations</Link>
-                </Button>
-              </div>
-            ) : (
               <div className="flex flex-col gap-3">
-                {recommended.map((item) => {
+                {recommended.map((item: RecommendedItem) => {
+                  const tierColors: Record<RecommendedTier, string> = {
+                    high:   "bg-red-50 text-red-600",
+                    medium: "bg-blue-50 text-blue-600",
+                    low:    "bg-amber-50 text-amber-700",
+                  }
+                  const badgeClass = tierColors[item.tier as RecommendedTier]
+
                   if (item.type === "requirement") {
-                    const { req, org } = item
+                    const { req, org, tierLabel } = item
                     const orgId = org.orgId || org.uid
                     const remaining = (req.totalQuantity ?? 0) - (req.fulfilledQuantity ?? 0)
                     return (
@@ -384,13 +442,13 @@ export default function DashboardPage() {
                               </p>
                             )}
                           </div>
-                          <span className="shrink-0 rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-600">{req.priority}</span>
+                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${badgeClass}`}>{tierLabel}</span>
                         </div>
                         <p className="flex items-center gap-1.5 text-sm text-muted-foreground mb-1">
                           <Package className="h-3.5 w-3.5 shrink-0" />
                           <span className="font-medium text-foreground">{req.title}</span>
                         </p>
-                        <p className="text-xs text-muted-foreground mb-3">Needs {remaining} {req.unit} · fully unfulfilled</p>
+                        <p className="text-xs text-muted-foreground mb-3">Needs {remaining} {req.unit} · {req.priority} priority</p>
                         <Button asChild size="sm" className="w-full rounded-lg">
                           <Link href={`/donor/sponsor?org=${orgId}&req=${req.id}&item=${encodeURIComponent(req.title)}&unit=${encodeURIComponent(req.unit)}&remaining=${remaining}`}>
                             Donate Now <ChevronRight className="h-3.5 w-3.5" />
@@ -399,9 +457,24 @@ export default function DashboardPage() {
                       </div>
                     )
                   } else {
-                    const { slot, org } = item
+                    const { slot, org, tierLabel } = item
                     const orgId = org.orgId || org.uid
-                    const mealsNeeded = (slot.totalNeeded ?? 0) - (slot.sponsored ?? 0)
+                    const totalNeeded = slot.totalNeeded ?? 0
+                    const sponsored = slot.sponsored ?? 0
+                    const mealsNeeded = totalNeeded - sponsored
+                    const fillPct = totalNeeded > 0 ? Math.round((sponsored / totalNeeded) * 100) : 0
+                    // Human-readable date: "Today" / "Tomorrow" / "28 Jun"
+                    const slotDateLabel = (() => {
+                      if (slot.date === tomorrowDateStr) return "Tomorrow"
+                      try {
+                        const [y, m, d] = slot.date.split("-").map(Number)
+                        return new Date(y, m - 1, d).toLocaleDateString("en-IN", { day: "numeric", month: "short" })
+                      } catch { return slot.date }
+                    })()
+                    // Availability label
+                    const availLabel = slot.status === "Partially Filled"
+                      ? `${mealsNeeded} of ${totalNeeded} meals open`
+                      : `${totalNeeded} meals · Open`
                     return (
                       <div key={`slot-${slot.id}`} className="rounded-xl border border-border p-4 hover:border-primary/40 transition-colors">
                         <div className="flex items-start justify-between gap-2 mb-2">
@@ -413,13 +486,34 @@ export default function DashboardPage() {
                               </p>
                             )}
                           </div>
-                          <span className="shrink-0 rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-600">Slot</span>
+                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${badgeClass}`}>{tierLabel}</span>
                         </div>
                         <p className="flex items-center gap-1.5 text-sm text-muted-foreground mb-1">
                           <Calendar className="h-3.5 w-3.5 shrink-0" />
                           <span className="font-medium text-foreground">{slot.title}</span>
+                          <span className="text-muted-foreground">· {slotDateLabel}</span>
                         </p>
-                        <p className="text-xs text-muted-foreground mb-3">{slot.date} · {mealsNeeded} meals needed · {slot.mealType ?? "Meal"}</p>
+                        {/* Availability bar */}
+                        <div className="mb-1">
+                          <div className="flex items-center justify-between mb-0.5">
+                            <span className="text-xs text-muted-foreground">{availLabel}</span>
+                            {slot.status === "Partially Filled" && (
+                              <span className="text-xs font-medium text-amber-600">{fillPct}% filled</span>
+                            )}
+                            {slot.status === "Available" && (
+                              <span className="text-xs font-medium text-emerald-600">Available</span>
+                            )}
+                          </div>
+                          {totalNeeded > 0 && (
+                            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                              <div
+                                className={`h-full rounded-full transition-all ${fillPct > 70 ? "bg-amber-500" : "bg-emerald-500"}`}
+                                style={{ width: `${fillPct}%` }}
+                              />
+                            </div>
+                          )}
+                        </div>
+                        <p className="text-xs text-muted-foreground mb-3">{slot.mealType ?? "Meal"}</p>
                         <Button asChild size="sm" className="w-full rounded-lg">
                           <Link href={`/donor/sponsor?org=${orgId}&slot=${slot.id}&date=${slot.date}&meals=${mealsNeeded}`}>
                             Sponsor Slot <ChevronRight className="h-3.5 w-3.5" />
@@ -433,8 +527,8 @@ export default function DashboardPage() {
                   View all organizations <ChevronRight className="h-3 w-3" />
                 </Link>
               </div>
-            )}
           </div>
+          )}
         </section>
       </div>
     </>

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react"
 import { useRouter } from "next/navigation"
-import { ShieldCheck, Users, Building2, MailCheck, Trash2, Loader2, Search, AlertTriangle, X, CheckCircle2 } from "lucide-react"
+import { ShieldCheck, Users, Building2, MailCheck, Trash2, Loader2, Search, AlertTriangle, X, CheckCircle2, Store } from "lucide-react"
 import { useAuth } from "@/lib/auth-context"
 import { InviteManager } from "@/components/admin/invite-manager"
 import { OrgApprovals } from "@/components/admin/org-approvals"
@@ -12,8 +12,10 @@ import {
   getUser,
   deleteDonorAccount,
   deleteOrganizationAccount,
+  getAllVendorsForAdmin,
   type UserDoc,
   type OrganizationDoc,
+  type VendorDoc,
 } from "@/lib/firestore"
 import { collection, getDocs, query, where } from "firebase/firestore"
 import { db } from "@/lib/firebase"
@@ -24,7 +26,7 @@ type UserEntry = {
   uid: string
   name: string
   email: string
-  role: "donor" | "organization"
+  role: "donor" | "organization" | "vendor"
   phone?: string
 }
 
@@ -87,7 +89,7 @@ function UserManagement() {
   const [users, setUsers] = useState<UserEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState("")
-  const [roleFilter, setRoleFilter] = useState<"all" | "donor" | "organization">("all")
+  const [roleFilter, setRoleFilter] = useState<"all" | "donor" | "organization" | "vendor">("all")
   const [toDelete, setToDelete] = useState<UserEntry | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deletedId, setDeletedId] = useState<string | null>(null)
@@ -95,10 +97,11 @@ function UserManagement() {
   const loadUsers = useCallback(async () => {
     setLoading(true)
     try {
-      // Fetch donors and orgs separately (no composite index needed)
-      const [donorSnap, orgSnap] = await Promise.all([
+      // Fetch donors, orgs, and vendors in parallel
+      const [donorSnap, orgSnap, vendors] = await Promise.all([
         getDocs(query(collection(db, "users"), where("role", "==", "donor"))),
         getDocs(query(collection(db, "users"), where("role", "==", "organization"))),
+        getAllVendorsForAdmin(),
       ])
       const all: UserEntry[] = [
         ...donorSnap.docs.map((d) => {
@@ -109,6 +112,13 @@ function UserManagement() {
           const data = d.data() as UserDoc
           return { uid: d.id, name: data.name ?? "—", email: data.email ?? "—", role: "organization" as const, phone: data.phone }
         }),
+        ...vendors.map((v) => ({
+          uid: v.uid,
+          name: v.businessName ?? v.ownerName ?? "—",
+          email: v.email ?? "—",
+          role: "vendor" as const,
+          phone: v.phone,
+        })),
       ]
       setUsers(all.sort((a, b) => a.name.localeCompare(b.name)))
     } catch (e) {
@@ -126,8 +136,12 @@ function UserManagement() {
     try {
       if (toDelete.role === "donor") {
         await deleteDonorAccount(toDelete.uid)
-      } else {
+      } else if (toDelete.role === "organization") {
         await deleteOrganizationAccount(toDelete.uid)
+      } else {
+        // vendor — delete from vendors collection + users doc if exists
+        const { deleteDoc, doc: firestoreDoc } = await import("firebase/firestore")
+        await deleteDoc(firestoreDoc(db, "vendors", toDelete.uid))
       }
       setDeletedId(toDelete.uid)
       setUsers((prev) => prev.filter((u) => u.uid !== toDelete.uid))
@@ -151,17 +165,38 @@ function UserManagement() {
 
   const donorCount = users.filter((u) => u.role === "donor").length
   const orgCount = users.filter((u) => u.role === "organization").length
+  const vendorCount = users.filter((u) => u.role === "vendor").length
+
+  const roleBadge = (role: UserEntry["role"]) => {
+    if (role === "donor") return <span className="hidden shrink-0 rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 sm:inline-block">Donor</span>
+    if (role === "organization") return <span className="hidden shrink-0 rounded-full bg-purple-50 px-2.5 py-0.5 text-xs font-medium text-purple-700 sm:inline-block">Org</span>
+    return <span className="hidden shrink-0 rounded-full bg-orange-50 px-2.5 py-0.5 text-xs font-medium text-orange-700 sm:inline-block">Vendor</span>
+  }
+
+  const avatarStyle = (role: UserEntry["role"]) => {
+    if (role === "donor") return "bg-blue-50 text-blue-700"
+    if (role === "organization") return "bg-purple-50 text-purple-700"
+    return "bg-orange-50 text-orange-700"
+  }
+
+  const filterButtons: { key: "all" | "donor" | "organization" | "vendor"; label: string }[] = [
+    { key: "all", label: "All" },
+    { key: "donor", label: "Donors" },
+    { key: "organization", label: "Orgs" },
+    { key: "vendor", label: "Vendors" },
+  ]
 
   return (
     <div className="rounded-2xl border border-gray-100 bg-white shadow-sm">
       <div className="border-b border-gray-100 px-6 py-5">
         <h2 className="text-lg font-bold text-gray-900">User Management</h2>
         <p className="mt-0.5 text-sm text-gray-500">
-          Remove donors or organizations and wipe all their data permanently.
+          Remove donors, organizations, or vendors and wipe their data permanently.
         </p>
         <div className="mt-3 flex flex-wrap gap-2 text-xs">
           <span className="rounded-full bg-blue-50 px-2.5 py-1 font-medium text-blue-700">{donorCount} donors</span>
           <span className="rounded-full bg-purple-50 px-2.5 py-1 font-medium text-purple-700">{orgCount} organizations</span>
+          <span className="rounded-full bg-orange-50 px-2.5 py-1 font-medium text-orange-700">{vendorCount} vendors</span>
         </div>
       </div>
 
@@ -178,17 +213,17 @@ function UserManagement() {
           />
         </div>
         <div className="flex gap-2 shrink-0">
-          {(["all", "donor", "organization"] as const).map((r) => (
+          {filterButtons.map(({ key, label }) => (
             <button
-              key={r}
-              onClick={() => setRoleFilter(r)}
-              className={`rounded-xl border px-3.5 py-2 text-sm font-medium transition-colors capitalize ${
-                roleFilter === r
+              key={key}
+              onClick={() => setRoleFilter(key)}
+              className={`rounded-xl border px-3.5 py-2 text-sm font-medium transition-colors ${
+                roleFilter === key
                   ? "border-blue-700 bg-blue-700 text-white"
                   : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
               }`}
             >
-              {r === "all" ? "All" : r === "organization" ? "Orgs" : "Donors"}
+              {label}
             </button>
           ))}
         </div>
@@ -216,9 +251,7 @@ function UserManagement() {
           filtered.map((u) => (
             <div key={u.uid} className="flex items-center gap-4 px-6 py-4">
               {/* Avatar */}
-              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-sm font-semibold ${
-                u.role === "donor" ? "bg-blue-50 text-blue-700" : "bg-purple-50 text-purple-700"
-              }`}>
+              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-sm font-semibold ${avatarStyle(u.role)}`}>
                 {u.name.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2)}
               </div>
 
@@ -230,13 +263,7 @@ function UserManagement() {
               </div>
 
               {/* Role badge */}
-              <span className={`hidden shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium sm:inline-block ${
-                u.role === "donor"
-                  ? "bg-blue-50 text-blue-700"
-                  : "bg-purple-50 text-purple-700"
-              }`}>
-                {u.role === "organization" ? "Org" : "Donor"}
-              </span>
+              {roleBadge(u.role)}
 
               {/* Delete button */}
               <button
@@ -260,6 +287,42 @@ function UserManagement() {
         />
       )}
     </div>
+  )
+}
+
+// ── Admin Stat Cards ──────────────────────────────────────────────────────────
+
+function AdminStatCards() {
+  const [counts, setCounts] = useState({ donors: 0, orgs: 0, vendors: 0, loaded: false })
+
+  useEffect(() => {
+    Promise.all([
+      getDocs(query(collection(db, "users"), where("role", "==", "donor"))),
+      getDocs(query(collection(db, "users"), where("role", "==", "organization"))),
+      getAllVendorsForAdmin(),
+    ]).then(([donorSnap, orgSnap, vendors]) => {
+      setCounts({ donors: donorSnap.size, orgs: orgSnap.size, vendors: vendors.length, loaded: true })
+    }).catch(console.error)
+  }, [])
+
+  const cards = [
+    { icon: Users,    label: "Donors",        value: counts.loaded ? String(counts.donors)  : "…", color: "text-blue-700",   bg: "bg-blue-50"   },
+    { icon: Building2, label: "Organizations", value: counts.loaded ? String(counts.orgs)    : "…", color: "text-green-700",  bg: "bg-green-50"  },
+    { icon: Store,    label: "Vendors",        value: counts.loaded ? String(counts.vendors) : "…", color: "text-orange-700", bg: "bg-orange-50" },
+  ]
+
+  return (
+    <section className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      {cards.map(({ icon: Icon, label, value, color, bg }) => (
+        <div key={label} className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
+          <span className={`flex h-10 w-10 items-center justify-center rounded-xl ${bg} ${color}`}>
+            <Icon className="h-5 w-5" />
+          </span>
+          <p className={`mt-3 text-xl font-bold ${color}`}>{value}</p>
+          <p className="text-sm text-gray-500">{label}</p>
+        </div>
+      ))}
+    </section>
   )
 }
 
@@ -302,22 +365,8 @@ export default function AdminDashboardPage() {
 
       <main className="mx-auto max-w-5xl space-y-8 p-6 lg:p-8">
 
-        {/* Quick stat cards */}
-        <section className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          {[
-            { icon: MailCheck,  label: "Invite System",    value: "Active",      color: "text-blue-700",   bg: "bg-blue-50"   },
-            { icon: Building2,  label: "Org Registration", value: "Invite Only", color: "text-green-700",  bg: "bg-green-50"  },
-            { icon: Users,      label: "Access Control",   value: "Enabled",     color: "text-purple-700", bg: "bg-purple-50" },
-          ].map(({ icon: Icon, label, value, color, bg }) => (
-            <div key={label} className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
-              <span className={`flex h-10 w-10 items-center justify-center rounded-xl ${bg} ${color}`}>
-                <Icon className="h-5 w-5" />
-              </span>
-              <p className={`mt-3 text-xl font-bold ${color}`}>{value}</p>
-              <p className="text-sm text-gray-500">{label}</p>
-            </div>
-          ))}
-        </section>
+        {/* Quick stat cards — live counts shown once UserManagement mounts */}
+        <AdminStatCards />
 
         {/* Organization approvals */}
         <OrgApprovals />
